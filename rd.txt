@@ -1,0 +1,6 @@
+nifty
+ bnf
+ check nifty
+ check nifty
+ check bnf at 9.15 to 9.30
+ check nifty,bnf,stocks at 9.15 to 9.30

@@ -1,0 +1,5 @@
+x=int(input("Num: ")
+if x>2:
+print("T")
+else :
+print("F")
