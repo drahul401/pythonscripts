@@ -1,0 +1,266 @@
+
+cdlprstovap0001:/home/sunkishg/vmax_scripts # cat btrfs_mv_creation.py
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+
+# Import Python Modules
+import os
+import re
+import sys
+import json
+import argparse
+from pprint import pprint
+import PyU4V
+import arxview
+
+dir_path = os.path.dirname(os.path.realpath(__file__))
+
+def parse_parameters():
+    # epilog message: Custom text after the help
+    epilog = '''
+    Example of use:
+        %s -host host name
+        %s -luns 5x512GB,10x256GB
+    ''' % (sys.argv[0],sys.argv[0])
+    # Create the argparse object and define global options
+    parser = argparse.ArgumentParser(description='python script for VMAX-AF storage provisioning',
+                                    formatter_class=argparse.RawDescriptionHelpFormatter,
+                                    epilog=epilog)
+    parser.add_argument('-host',
+                        type=str,
+                        required=True,
+                        help='host name')
+    parser.add_argument('-luns',
+                        type=str,
+                        required=False,
+                        help='lun Breakdown')
+    parser.add_argument('-sid',
+                        type=str,
+                        required=False,
+                        help='Symmetrix ID')
+    # If there is no parameter, print help
+    if len(sys.argv) < 1:
+        parser.print_help()
+        sys.exit(0)
+
+    return parser.parse_args()
+
+def get_hostinfo_arxview(host_name):
+    try:
+        x = arxview.arxview_api(host_name)
+    except:
+        x = []
+
+    arrays_list = list()
+
+    if len(x) > 0:
+        for line in x:
+            if line['array_vendor'] == 'EMC' and line['array_product'] == 'VMAX':
+                array_l = line['array_name'].split('-')
+                arrays_list.append({ 'type' : array_l[0], 'sid': array_l[1]})
+                # example : {'type': 'VMAXF', 'sid': '1071'}
+
+    return arrays_list
+
+def get_uni_ip(sid):
+    data = {'sid': sid, 'ip': '0.0.0.0', 'rc': 1}
+    unidata = {
+        "000196701605": "7.10.254.80",
+        "000196701606": "7.10.254.80",
+        "000196701608": "10.3.218.40",
+        "000196701609": "7.6.254.91",
+        "000196701610": "7.10.254.80",
+        "000196701611": "7.10.254.80",
+        "000196701612": "7.6.254.91",
+        "000196701613": "7.6.254.91",
+        "000196702080": "7.6.254.91",
+        "000197700422": "7.8.7.20",
+        "000197700423": "7.4.7.20",
+        "000197800897": "7.10.73.178",
+        "000197800898": "7.6.77.224",
+        "000197800904": "7.6.254.91",
+        "000197800905": "7.10.254.80",
+        "000197800929": "7.6.254.91",
+        "000197800932": "7.10.254.80",
+        "000197801052": "7.10.73.230",
+        "000197801053": "7.10.250.5",
+        "000197801059": "7.6.251.6",
+        "000197801060": "7.6.251.6",
+        "000197801066": "7.6.251.6",
+        "000197801067": "7.10.250.5",
+        "000197801068": "7.10.250.5",
+        "000197801069": "7.10.250.5",
+        "000197801071": "7.6.251.6",
+        "000197801074": "7.6.77.154",
+        "000197800456": "10.3.218.40"
+        }
+    for array in unidata.keys():
+        if not re.search(sid, array): continue
+        ipaddr = unidata.get(array, '0.0.0.0')
+        data = {'sid': array, 'ip': ipaddr, 'rc': 0}
+        break
+
+    return data
+
+def validate_connection(host_name):
+    # Get Host information from Arxview using Arxview API
+    arx_info = get_hostinfo_arxview(host_name)
+
+    # If the results are zero
+    if len(arx_info) == 0:
+        result = { "message": "Host not connected to VMAX Storage Array", "success": "false", "resultlist": [] }
+        return result
+    # If the Host connected to more than one Storage arry
+    elif len(arx_info) > 1:
+        result = { "message": "Host connected to more than one VMAX Storage Array, select an array from the list", "success": "false", "resultlist": arx_info }
+        return result
+    # Server connected to just one Vmax Storage array
+    elif len(arx_info) == 1:
+        sid = arx_info[0].get('sid', 0)
+        # get unisphere IP address of the Symmetrix array
+        uni_data = get_uni_ip(sid)
+        if uni_data.get('rc'):
+            result = { "message": "couldn't find unisphere information for Symmetrix: {0}".format(sid), "success": "false", "resultlist": [] }
+            return result
+        else:
+            ip = uni_data.get('ip')
+
+            # try to establish connection with Unisphere REST API
+            try:
+                ru = PyU4V.rest_functions(server_ip=ip)
+                # ru.close_session()
+                result = { "message": "connection was successfully established with the server for Symmetrix: {0}".format(sid), "success": "true", "resultlist": [uni_data] }
+                return result
+            except Exception as e:
+                result = { "message": "couldn't establish connection with unisphere server for Symmetrix: {0}".format(sid), "success": "false", "resultlist": [] }
+                return result
+
+def get_hostinfo(host_name, array_info):
+    symmetrixid = array_info.get('sid')
+    unisphereip = array_info.get('ip')
+    ru = PyU4V.rest_functions(server_ip=unisphereip)
+    ru.set_array(symmetrixid)
+    sglist,rc = ru.get_sg()
+    if rc == 200:
+        for sgline in sglist['storageGroupId']:
+            if host_name in sgline:
+                sginfo = ru.get_sg(sg_id=sgline)
+                if sginfo[1] == 200:
+                    sgtype = sginfo[0]['storageGroup'][0]['type']
+                    if sgtype == 'Child':
+                        num_of_masking_views = sginfo[0]['storageGroup'][0]['num_of_masking_views']
+                        maskingviewnos = sginfo[0]['storageGroup'][0]['maskingview']
+                        if maskingviewnos > 0:
+                            sgname = sgline
+                            return { "message": "found a SG", "success": "true", "resultlist": [sgname] }
+
+def get_ig(host_name, array_info):
+    symmetrixid = array_info.get('sid')
+    unisphereip = array_info.get('ip')
+    ru = PyU4V.rest_functions(server_ip=unisphereip)
+    ru.set_array(symmetrixid)
+    iglist = list()
+    num_of_hosts, rc = ru.get_hosts()
+    if rc == 200:
+        for hostid in num_of_hosts['hostId']:
+            if host_name in hostid:
+                iglist.append(hostid)
+    mvlist = list()
+    for hostid in iglist:
+        mvs = ru.get_maskingview_from_host(hostid)
+        for mv in mvs:
+            mvlist.append(mv)
+
+    masking_list = list()
+    for mv in mvlist:
+        mvdata, rc = ru.get_masking_views(maskingview_id=mv)
+        # if success
+        if rc == 200:
+            mvdict = mvdata['maskingView'][0]
+            if 'hostGroupId' in mvdict.keys():
+                mvtype = 'cluster'
+            elif 'hostId' in mvdict.keys():
+                mvtype = 'standalone'
+            mvdict['mvtype'] = mvtype
+            mvdict['sid'] = symmetrixid
+            mvdict['ip'] = unisphereip
+            mvdict['iglist'] = iglist
+            masking_list.append(mvdict)
+
+    return masking_list
+
+def create_btrfs_mv(server_name, ip, sid, ig_id, pg_id, child_sg, parent_sg, mv_id):
+    # creates new MV
+    ru = PyU4V.rest_functions(server_ip=ip)
+    ru.set_array(sid)
+    print "Creating child sg: {0}\n".format(child_sg)
+    result, rc = ru.create_non_empty_storagegroup(srpID="SRP_1", sg_id=child_sg, slo="Diamond", workload="DSS", num_vols=1, vol_size=180, capUnit="GB", disable_compression=True)
+    if rc == 201:
+        print "child SG created successfully, setting IO limits\n"
+        result, rc = ru.set_sgiolimits(child_sg)
+        if rc == 200:
+            print "IO limits configured, creating parent sg: {0}\n".format(parent_sg)
+            result, rc = ru.create_empty_sg(parent_sg)
+            if rc == 201:
+                print "parent sg created successfully, adding child sg to parent sg\n"
+                result, rc = ru.add_child_sg_to_parent_sg(parent_sg, child_sg)
+                if rc == 200:
+                    print "child SG added to parent sg, Creating masking view\n"
+                    result, rc = ru.create_masking_view_existing_components(masking_view_name=mv_id, port_group_name=pg_id, storage_group_name=parent_sg, host_name=ig_id)
+                    if rc == 200:
+                        print "masking view {0} created successfully for {1}\n".format(mv_id, server_name)
+                        server_out = os.path.join(dir_path, '{0}_btrfs_info.JSON'.format(server_name))
+                        fserver = open(server_out, 'w')
+                        vols_list = ru.get_vols_from_SG(child_sg)
+                        for lun in vols_list:
+                            lun_info = ru.get_volumes(vol_id=lun)
+                            lun_details = json.dumps({'tdev_id' : lun, 'tdev_wwn': lun_info[0]['volume'][0]['wwn'], 'storagearray': sid, 'maskingview': mv_id, 'hostname': server_name}, indent=4, sort_keys=True)
+                            print lun_details
+                            fserver.write(lun_details)
+                        fserver.close()
+                        return "success"
+
+def main():
+    # validate arguments
+    args = parse_parameters()
+    ru = PyU4V.rest_functions()
+    if not args.host:
+        print json.dumps({ 'message': 'Host Name required for the allocation', 'success' : 'false'})
+
+    print "-"*100
+    host_name = args.host
+    connection_result = validate_connection(host_name)
+    if connection_result.get('success') == 'true':
+        hostinfo = get_ig(host_name, connection_result.get('resultlist')[0])
+        print hostinfo
+        if len(hostinfo) == 1:
+            #print (connection_result.get('resultlist')[0], hostinfo[0], args.luns)
+            data = hostinfo[0]
+            print json.dumps(data, indent=4, sort_keys=True)
+            server_name = host_name
+            ip = data['ip']
+            sid = data['sid']
+            ig_id = data['iglist'][0]
+            pg_id = data['portGroupId']
+            child_sg = "{0}_btrfs_g_SG".format(server_name)
+            parent_sg = "{0}_btrfs_SG".format(server_name)
+            mv_id = "{0}_btrfs_MV".format(server_name)
+            print "please confirm new masking view creation using initiator group: {0}, Port Group: {1}".format(ig_id, pg_id)
+            confirmation = raw_input("Enter confirmation (y/n): ").strip().lower()
+            if confirmation == 'y':
+                btrfs_result = create_btrfs_mv(server_name, ip, sid, ig_id, pg_id, child_sg, parent_sg, mv_id)
+                if btrfs_result == 'success':
+                    print "BTRFS masking view creation Completed successfully"
+                else:
+                    print "error while creating btrfs masking view for:  {0}".format(host_name)
+    if connection_result.get('success') == 'false':
+        print json.dumps(connection_result)
+    elif connection_result.get('success') == 'false' and len(connection_result.get('resultlist')):
+        connection_result['multiple_connections'] = 'yes'
+        print json.dumps(connection_result)
+    print "-"*100
+
+if __name__ == '__main__':
+    main()
+cdlprstovap0001:/home/sunkishg/vmax_scripts #
